@@ -102,14 +102,28 @@ function get_forms(): array {
             $id = $f['id'] ?? $f['guid'] ?? null;
             $name = $f['name'] ?? 'Untitled form';
             $fields = [];
-            // v3 field schema lives under 'formFieldGroups' similar to v2; handle both
-            if (isset($f['formFieldGroups']) && is_array($f['formFieldGroups'])) {
+            // v3 field schema lives under 'fieldGroups' (not 'formFieldGroups')
+            if (isset($f['fieldGroups']) && is_array($f['fieldGroups'])) {
+                foreach ($f['fieldGroups'] as $g) {
+                    if (!empty($g['fields'])) {
+                        foreach ($g['fields'] as $fld) {
+                            $fields[] = [
+                                'name' => $fld['name'] ?? '',
+                                'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
+                                'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
+                            ];
+                        }
+                    }
+                }
+            }
+            // Also check for legacy 'formFieldGroups' structure
+            elseif (isset($f['formFieldGroups']) && is_array($f['formFieldGroups'])) {
                 foreach ($f['formFieldGroups'] as $g) {
                     if (!empty($g['fields'])) {
                         foreach ($g['fields'] as $fld) {
                             $fields[] = [
                                 'name' => $fld['name'] ?? '',
-                                'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                                'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                                 'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                             ];
                         }
@@ -137,7 +151,7 @@ function get_forms(): array {
                     foreach (($g['fields'] ?? []) as $fld) {
                         $fields[] = [
                             'name' => $fld['name'] ?? '',
-                            'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                            'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                             'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                         ];
                     }
@@ -167,13 +181,25 @@ function get_form_details(string $formId): array {
         $fields = [];
         $formData = $r['data'];
         
-        // Try different possible field structures
-        if (!empty($formData['formFieldGroups'])) {
+        // Try different possible field structures - v3 uses 'fieldGroups'
+        if (!empty($formData['fieldGroups'])) {
+            foreach ($formData['fieldGroups'] as $g) {
+                foreach (($g['fields'] ?? []) as $fld) {
+                    $fields[] = [
+                        'name' => $fld['name'] ?? '',
+                        'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
+                        'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
+                    ];
+                }
+            }
+        }
+        // Also check for legacy 'formFieldGroups' structure
+        elseif (!empty($formData['formFieldGroups'])) {
             foreach ($formData['formFieldGroups'] as $g) {
                 foreach (($g['fields'] ?? []) as $fld) {
                     $fields[] = [
                         'name' => $fld['name'] ?? '',
-                        'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                        'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                         'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                     ];
                 }
@@ -183,7 +209,7 @@ function get_form_details(string $formId): array {
             foreach ($formData['fields'] as $fld) {
                 $fields[] = [
                     'name' => $fld['name'] ?? '',
-                    'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                    'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                     'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                 ];
             }
@@ -195,7 +221,7 @@ function get_form_details(string $formId): array {
                         foreach ($action['fields'] as $fld) {
                             $fields[] = [
                                 'name' => $fld['name'] ?? '',
-                                'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                                'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                                 'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                             ];
                         }
@@ -222,7 +248,7 @@ function get_form_details(string $formId): array {
                 foreach (($g['fields'] ?? []) as $fld) {
                     $fields[] = [
                         'name' => $fld['name'] ?? '',
-                        'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                        'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                         'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                     ];
                 }
@@ -232,7 +258,7 @@ function get_form_details(string $formId): array {
             foreach ($formData['fields'] as $fld) {
                 $fields[] = [
                     'name' => $fld['name'] ?? '',
-                    'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                    'label' => $fld['label'] ?? $fld['placeholder'] ?? ($fld['name'] ?? ''),
                     'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
                 ];
             }
