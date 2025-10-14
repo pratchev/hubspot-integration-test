@@ -274,14 +274,14 @@ function get_form_details(string $formId): array {
 
 /**
  * Get submissions for a form (25/page) using:
- * GET /crm/v3/extensions/forms/{formId}/submissions?limit=25&after=<cursor>
+ * GET /form-integrations/v1/submissions/forms/{form_guid}?limit=25&after=<cursor>
  * Returns rows + paging info. Sorted by submittedAt desc if API supports; otherwise sort client-side.
  */
 function get_form_submissions(string $formId, int $limit = 25, ?string $after = null): array {
     $query = ['limit' => $limit];
     if ($after) $query['after'] = $after;
 
-    $url = HUBSPOT_BASE . '/crm/v3/extensions/forms/' . urlencode($formId) . '/submissions';
+    $url = HUBSPOT_BASE . '/form-integrations/v1/submissions/forms/' . urlencode($formId);
     $r   = hs_request('GET', $url, $query);
 
     if (!$r['ok']) {
@@ -289,7 +289,7 @@ function get_form_submissions(string $formId, int $limit = 25, ?string $after = 
             'supported' => false,
             'message'   => 'Form submissions API not available in this account or token scope. You can still validate forms & fields.',
             'rows'      => [],
-            'columns'   => ['createdate', 'lastmodifieddate'],
+            'columns'   => ['conversationId', 'submittedAt', 'pageUrl'],
             'paging'    => [
                 'next' => null, 
                 'prev' => null, 
@@ -306,9 +306,13 @@ function get_form_submissions(string $formId, int $limit = 25, ?string $after = 
     $data = $r['data'] ?? [];
     $results = $data['results'] ?? $data['submissions'] ?? [];
     $nextCursor = $data['paging']['next']['after'] ?? null;
-    $total = $data['total'] ?? null;
+    $total = $data['total'] ?? $data['paging']['total'] ?? null;
+    
+    // Debug: Log the total value
+    error_log('API returned total: ' . ($total !== null ? $total : 'null'));
+    error_log('Full API response structure: ' . json_encode($data, JSON_PRETTY_PRINT));
 
-    // Normalize submissions to rows: each row = property => value, plus createdate/lastmodifieddate
+    // Normalize submissions to rows: each row = property => value, plus conversationId, submittedAt, pageUrl
     $rows = [];
     $allKeys = [];
     foreach ($results as $sub) {
@@ -326,34 +330,32 @@ function get_form_submissions(string $formId, int $limit = 25, ?string $after = 
             foreach ($sub['properties'] as $k => $v) $vals[$k] = is_array($v) ? json_encode($v) : $v;
         }
 
-        // Dates
-        $created = $sub['submittedAt'] ?? $sub['createdAt'] ?? null;
-        $updated = $sub['updatedAt'] ?? $created;
-
-        $vals['createdate'] = $created ? date('Y-m-d H:i:s', strtotime($created)) : '';
-        $vals['lastmodifieddate'] = $updated ? date('Y-m-d H:i:s', strtotime($updated)) : '';
-        $vals['_rawCreateDate'] = $created; // Keep raw for sorting
+        // New required fields
+        $vals['conversationId'] = $sub['conversationId'] ?? '';
+        $vals['submittedAt'] = $sub['submittedAt'] ?? '';
+        $vals['pageUrl'] = $sub['pageUrl'] ?? '';
+        $vals['_rawSubmittedAt'] = $sub['submittedAt'] ?? null; // Keep raw for sorting
 
         $rows[] = $vals;
         $allKeys = array_unique(array_merge($allKeys, array_keys($vals)));
     }
 
-    // Ensure createdate is first, lastmodifieddate second; keep others after, but exclude internal fields
+    // Ensure conversationId, submittedAt, and pageUrl are first; keep others after, but exclude internal fields
     $columns = array_values(array_unique(array_merge(
-        ['createdate', 'lastmodifieddate'], 
-        array_diff($allKeys, ['createdate', 'lastmodifieddate', '_rawCreateDate'])
+        ['conversationId', 'submittedAt', 'pageUrl'], 
+        array_diff($allKeys, ['conversationId', 'submittedAt', 'pageUrl', '_rawSubmittedAt'])
     )));
 
-    // Sort rows by createdate desc (client-side, just in case)
+    // Sort rows by submittedAt desc (client-side, just in case)
     usort($rows, function($a, $b) {
-        $dateA = $a['_rawCreateDate'] ?? $a['createdate'] ?? '';
-        $dateB = $b['_rawCreateDate'] ?? $b['createdate'] ?? '';
+        $dateA = $a['_rawSubmittedAt'] ?? $a['submittedAt'] ?? '';
+        $dateB = $b['_rawSubmittedAt'] ?? $b['submittedAt'] ?? '';
         return strcmp($dateB, $dateA); // Descending order
     });
 
     // Remove internal fields from output
     foreach ($rows as &$row) {
-        unset($row['_rawCreateDate']);
+        unset($row['_rawSubmittedAt']);
     }
 
     // Calculate pagination info
@@ -464,7 +466,7 @@ if (isset($_GET['action'])) {
     color:#fff; padding:28px 20px; border-bottom:4px solid var(--cp-red);
   }
   h1{margin:0; font-size:22px; letter-spacing:.4px}
-  .container{max-width:1200px; margin:20px auto; padding:0 16px}
+  .container{max-width:90%; width:90%; margin:20px auto; padding:0 16px}
   .card{
     background:#fff; border:1px solid var(--cp-border); border-radius: var(--radius);
     box-shadow: 0 6px 16px rgba(10,18,38,.06);
@@ -491,14 +493,18 @@ if (isset($_GET['action'])) {
   .prop-type{color:var(--cp-muted); font-size:12px}
   table{
     width:100%; border-collapse:separate; border-spacing:0; border:1px solid var(--cp-border);
-    border-radius:10px; overflow:hidden; font-size:14px;
+    border-radius:10px; overflow:hidden; font-size:14px; table-layout:fixed;
   }
   thead{background:var(--cp-navy); color:#fff; position:sticky; top:0}
   th, td{padding:10px 12px; border-bottom:1px solid var(--cp-border); text-align: left;}
-  th{font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;}
+  th{font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; white-space: normal; word-wrap: break-word; hyphens: auto; line-height: 1.3;}
   tbody tr:nth-child(even){background:#fafafa}
   tbody tr:hover{background:#f0f4f8}
   td{vertical-align: top;}
+  .url-column{width:8%; min-width:65px; word-wrap:break-word; overflow-wrap:break-word;}
+  .conversation-column{width:4%; min-width:35px;}
+  .submitted-column{width:5%; min-width:40px;}}}
+  .table-container{overflow-x:auto; max-width:100%;}
   .toolbar{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:10px; flex-wrap: wrap;}
   .btn{
     appearance:none; border:1px solid var(--cp-navy); background:#fff; color:var(--cp-navy);
@@ -515,7 +521,21 @@ if (isset($_GET['action'])) {
   .notice{padding:12px; border-radius:8px; margin-bottom:16px; font-weight:500}
   .notice-warning{background:#fff3cd; border:1px solid #ffeaa7; color:#856404}
   .notice-error{background:#f8d7da; border:1px solid #f5c6cb; color:#721c24}
-  @media (max-width:900px){ .row{grid-template-columns:1fr} }
+  @media (max-width:900px){ 
+    .row{grid-template-columns:1fr}
+    .container{padding:0 12px; width:95%}
+    .url-column{min-width:50px}
+    .conversation-column{min-width:30px}
+    .submitted-column{min-width:35px}
+  }
+  @media (max-width:600px){
+    .url-column{min-width:40px; font-size:10px}
+    .conversation-column, .submitted-column{min-width:25px; font-size:10px}
+    th, td{padding:6px 4px; font-size:11px}
+    th{font-size:10px; line-height:1.2}
+    .container{width:98%}
+    .stats{font-size:12px}
+  }
 </style>
 </head>
 <body>
@@ -548,11 +568,13 @@ if (isset($_GET['action'])) {
 
   <div class="card" id="dataCard" style="display:none">
     <div class="grid-title">Form Data</div>
-    <div style="overflow:auto; max-height:60vh">
-      <table id="dataTable">
-        <thead><tr id="theadRow"></tr></thead>
-        <tbody id="tbodyRows"></tbody>
-      </table>
+    <div class="table-container">
+      <div style="overflow:auto; max-height:70vh">
+        <table id="dataTable">
+          <thead><tr id="theadRow"></tr></thead>
+          <tbody id="tbodyRows"></tbody>
+        </table>
+      </div>
     </div>
     <div class="toolbar">
       <div class="inline">
@@ -561,7 +583,7 @@ if (isset($_GET['action'])) {
         <button class="btn" id="nextBtn">Next ▶</button>
         <button class="btn" id="lastBtn">⏭ Last</button>
       </div>
-      <div class="stats" id="statsText">Page 1 of 1 • 0 records</div>
+      <div class="stats" id="statsText">Page 1 • 0 records on this page</div>
     </div>
   </div>
 </div>
@@ -636,9 +658,15 @@ function renderTable(columns, rows){
     const th = document.createElement('th');
     // Capitalize and format column headers
     let displayName = c;
-    if (c === 'createdate') displayName = 'Created Date';
-    else if (c === 'lastmodifieddate') displayName = 'Last Modified';
+    if (c === 'conversationId') displayName = 'Conversation ID';
+    else if (c === 'submittedAt') displayName = 'Submitted At';
+    else if (c === 'pageUrl') displayName = 'Page URL';
     else displayName = c.charAt(0).toUpperCase() + c.slice(1);
+    
+    // Add CSS classes for column sizing
+    if (c === 'pageUrl') th.className = 'url-column';
+    else if (c === 'conversationId') th.className = 'conversation-column';
+    else if (c === 'submittedAt') th.className = 'submitted-column';
     
     th.textContent = displayName;
     theadRow.appendChild(th);
@@ -652,7 +680,7 @@ function renderTable(columns, rows){
       let value = r[c] ?? '';
       
       // Format dates for better readability
-      if ((c === 'createdate' || c === 'lastmodifieddate') && value) {
+      if (c === 'submittedAt' && value) {
         try {
           const date = new Date(value);
           if (!isNaN(date.getTime())) {
@@ -664,10 +692,22 @@ function renderTable(columns, rows){
       }
       
       td.textContent = value;
+      
+      // Add CSS classes for column sizing
+      if (c === 'pageUrl') td.className = 'url-column';
+      else if (c === 'conversationId') td.className = 'conversation-column';
+      else if (c === 'submittedAt') td.className = 'submitted-column';
+      
       // Add special styling for date columns
-      if (c === 'createdate' || c === 'lastmodifieddate') {
+      if (c === 'submittedAt') {
         td.style.fontSize = '13px';
         td.style.color = 'var(--cp-muted)';
+      }
+      // Add special styling for URL columns
+      if (c === 'pageUrl' && value) {
+        td.style.fontSize = '12px';
+        td.style.wordBreak = 'break-all';
+        td.style.lineHeight = '1.4';
       }
       tr.appendChild(td);
     });
@@ -803,15 +843,20 @@ async function onFormChange(){
 function updatePagerUI(pagingData){
   const pageNum = pagingData.currentPage || paging.currentPage;
   const totalPages = pagingData.totalPages || paging.totalPages || '—';
-  const totalRecs = pagingData.total || paging.total || '—';
+  const totalRecs = pagingData.total !== undefined ? pagingData.total : (paging.total !== undefined ? paging.total : null);
   const recordCount = pagingData.recordCount || 0;
   
-  // Update display
-  if (totalPages !== '—' && totalRecs !== '—') {
-    statsText.textContent = `Page ${pageNum} of ${totalPages} • ${totalRecs} records total (${recordCount} on this page)`;
-  } else {
-    statsText.textContent = `Page ${pageNum} • ${recordCount} records on this page`;
+  // Update display with total records
+  let displayText = `Page ${pageNum}`;
+  if (totalPages !== '—') {
+    displayText += ` of ${totalPages}`;
   }
+  displayText += ` • ${recordCount} records on this page`;
+  if (totalRecs !== null && totalRecs !== '—') {
+    displayText += ` • ${totalRecs} total records`;
+  }
+  
+  statsText.textContent = displayText;
 
   // Update button states
   const hasPrev = pagingData.hasPrev !== undefined ? pagingData.hasPrev : (paging.cursorStack.length > 0);
@@ -824,7 +869,7 @@ function updatePagerUI(pagingData){
   
   // Update paging state
   paging.currentPage = pageNum;
-  paging.total = pagingData.total || paging.total;
+  paging.total = pagingData.total !== undefined ? pagingData.total : paging.total;
   paging.totalPages = pagingData.totalPages || paging.totalPages;
   paging.next = pagingData.next;
   paging.recordCount = recordCount;
@@ -857,9 +902,9 @@ async function loadSubmissions(after=null, reset=false){
     
     // Handle empty results
     if (!data.rows || data.rows.length === 0) {
-      renderTable(data.columns || ['createdate', 'lastmodifieddate'], []);
+      renderTable(data.columns || ['conversationId', 'submittedAt', 'pageUrl'], []);
       // Show empty state
-      tbodyRows.innerHTML = `<tr><td colspan="${data.columns?.length || 2}" style="text-align: center; padding: 20px; color: var(--cp-muted); font-style: italic;">No form submissions found</td></tr>`;
+      tbodyRows.innerHTML = `<tr><td colspan="${data.columns?.length || 3}" style="text-align: center; padding: 20px; color: var(--cp-muted); font-style: italic;">No form submissions found</td></tr>`;
       updatePagerUI({ currentPage: 1, totalPages: 1, total: 0, recordCount: 0, hasNext: false, hasPrev: false });
       return;
     }
@@ -915,23 +960,37 @@ qs('#firstBtn').addEventListener('click', async () => {
 });
 
 qs('#lastBtn').addEventListener('click', async () => {
-  // For last page, we need to navigate through all pages
-  // This is a limitation of cursor-based pagination
+  // For cursor-based pagination, we need to navigate through pages to reach the last one
   if (!paging.totalPages || paging.totalPages === '—') {
-    // If we don't know total pages, just go to next page
-    if (paging.next) {
+    // If we don't know total pages, keep going until we can't go further
+    let attempts = 0;
+    const maxAttempts = 50; // Safety limit
+    
+    while (paging.next && attempts < maxAttempts) {
       const currentCursor = paging.next;
       paging.cursorStack.push({ cursor: currentCursor, page: paging.currentPage });
       paging.currentPage++;
       await loadSubmissions(currentCursor);
+      attempts++;
+      
+      // Add a small delay to prevent overwhelming the API
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Break if we've reached the end
+      if (!paging.next) break;
     }
   } else {
-    // Try to estimate last page navigation
-    while (paging.next && paging.currentPage < paging.totalPages) {
+    // If we know the total pages, navigate more efficiently
+    let attempts = 0;
+    const maxAttempts = Math.min(paging.totalPages - paging.currentPage, 50);
+    
+    while (paging.next && paging.currentPage < paging.totalPages && attempts < maxAttempts) {
       const currentCursor = paging.next;
       paging.cursorStack.push({ cursor: currentCursor, page: paging.currentPage });
       paging.currentPage++;
       await loadSubmissions(currentCursor);
+      attempts++;
+      
       // Add a small delay to prevent overwhelming the API
       await new Promise(resolve => setTimeout(resolve, 100));
     }
