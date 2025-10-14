@@ -289,16 +289,24 @@ function get_form_submissions(string $formId, int $limit = 25, ?string $after = 
             'supported' => false,
             'message'   => 'Form submissions API not available in this account or token scope. You can still validate forms & fields.',
             'rows'      => [],
-            'columns'   => [],
-            'paging'    => ['next' => null, 'prev' => null, 'last' => null, 'total' => 0],
+            'columns'   => ['createdate', 'lastmodifieddate'],
+            'paging'    => [
+                'next' => null, 
+                'prev' => null, 
+                'hasNext' => false,
+                'hasPrev' => false,
+                'currentPage' => 1,
+                'total' => 0,
+                'totalPages' => 1
+            ],
             'raw'       => $r
         ];
     }
 
     $data = $r['data'] ?? [];
     $results = $data['results'] ?? $data['submissions'] ?? [];
-    $paging  = $data['paging']['next']['after'] ?? null;
-    $total   = $data['total'] ?? null; // not always provided
+    $nextCursor = $data['paging']['next']['after'] ?? null;
+    $total = $data['total'] ?? null;
 
     // Normalize submissions to rows: each row = property => value, plus createdate/lastmodifieddate
     $rows = [];
@@ -320,33 +328,60 @@ function get_form_submissions(string $formId, int $limit = 25, ?string $after = 
 
         // Dates
         $created = $sub['submittedAt'] ?? $sub['createdAt'] ?? null;
-        $updated = $sub['updatedAt']   ?? $created;
+        $updated = $sub['updatedAt'] ?? $created;
 
-        $vals['createdate'] = $created ? date('c', strtotime($created)) : '';
-        $vals['lastmodifieddate'] = $updated ? date('c', strtotime($updated)) : '';
+        $vals['createdate'] = $created ? date('Y-m-d H:i:s', strtotime($created)) : '';
+        $vals['lastmodifieddate'] = $updated ? date('Y-m-d H:i:s', strtotime($updated)) : '';
+        $vals['_rawCreateDate'] = $created; // Keep raw for sorting
 
         $rows[] = $vals;
         $allKeys = array_unique(array_merge($allKeys, array_keys($vals)));
     }
 
-    // Ensure createdate is first, lastmodifieddate second; keep others after
-    $columns = array_values(array_unique(array_merge(['createdate', 'lastmodifieddate'], array_diff($allKeys, ['createdate','lastmodifieddate']))));
+    // Ensure createdate is first, lastmodifieddate second; keep others after, but exclude internal fields
+    $columns = array_values(array_unique(array_merge(
+        ['createdate', 'lastmodifieddate'], 
+        array_diff($allKeys, ['createdate', 'lastmodifieddate', '_rawCreateDate'])
+    )));
 
     // Sort rows by createdate desc (client-side, just in case)
     usort($rows, function($a, $b) {
-        return strcmp($b['createdate'] ?? '', $a['createdate'] ?? '');
+        $dateA = $a['_rawCreateDate'] ?? $a['createdate'] ?? '';
+        $dateB = $b['_rawCreateDate'] ?? $b['createdate'] ?? '';
+        return strcmp($dateB, $dateA); // Descending order
     });
+
+    // Remove internal fields from output
+    foreach ($rows as &$row) {
+        unset($row['_rawCreateDate']);
+    }
+
+    // Calculate pagination info
+    $currentPage = 1;
+    if ($after) {
+        // This is a rough estimate since we don't have perfect page tracking
+        $currentPage = 2; // At minimum page 2 if we have an after cursor
+    }
+    
+    $totalPages = $total ? max(1, ceil($total / $limit)) : null;
+    $hasNext = !empty($nextCursor);
+    $hasPrev = !empty($after);
 
     return [
         'supported' => true,
-        'rows'      => $rows,
-        'columns'   => $columns,
-        'paging'    => [
-            'next' => $data['paging']['next']['after'] ?? null,
-            'prev' => $_GET['after'] ?? null, // track we came from
+        'rows' => $rows,
+        'columns' => $columns,
+        'paging' => [
+            'next' => $nextCursor,
+            'prev' => $after,
+            'hasNext' => $hasNext,
+            'hasPrev' => $hasPrev,
+            'currentPage' => $currentPage,
             'total' => $total,
+            'totalPages' => $totalPages,
+            'recordCount' => count($rows)
         ],
-        'raw'       => $data
+        'raw' => $data
     ];
 }
 
@@ -459,19 +494,27 @@ if (isset($_GET['action'])) {
     border-radius:10px; overflow:hidden; font-size:14px;
   }
   thead{background:var(--cp-navy); color:#fff; position:sticky; top:0}
-  th, td{padding:10px 12px; border-bottom:1px solid var(--cp-border)}
+  th, td{padding:10px 12px; border-bottom:1px solid var(--cp-border); text-align: left;}
+  th{font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;}
   tbody tr:nth-child(even){background:#fafafa}
-  .toolbar{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:10px}
+  tbody tr:hover{background:#f0f4f8}
+  td{vertical-align: top;}
+  .toolbar{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:10px; flex-wrap: wrap;}
   .btn{
     appearance:none; border:1px solid var(--cp-navy); background:#fff; color:var(--cp-navy);
-    padding:8px 10px; border-radius:10px; cursor:pointer; font-weight:600;
+    padding:8px 12px; border-radius:10px; cursor:pointer; font-weight:600; font-size: 13px;
+    transition: all 0.2s ease;
   }
-  .btn[disabled]{opacity:.45; cursor:not-allowed}
+  .btn:hover:not([disabled]){background:var(--cp-navy); color:#fff;}
+  .btn[disabled]{opacity:.45; cursor:not-allowed; background:#f8f9fa;}
   .btn.primary{background:var(--cp-red); border-color:var(--cp-red); color:#fff}
-  .stats{color:var(--cp-muted); font-size:13px}
-  .inline{display:flex; gap:12px; align-items:center}
+  .stats{color:var(--cp-muted); font-size:13px; font-weight: 500;}
+  .inline{display:flex; gap:8px; align-items:center}
   .badge{background:var(--cp-accent); color:#fff; padding:3px 8px; border-radius:999px; font-size:12px}
   .hint{color:var(--cp-muted); font-size:13px}
+  .notice{padding:12px; border-radius:8px; margin-bottom:16px; font-weight:500}
+  .notice-warning{background:#fff3cd; border:1px solid #ffeaa7; color:#856404}
+  .notice-error{background:#f8d7da; border:1px solid #f5c6cb; color:#721c24}
   @media (max-width:900px){ .row{grid-template-columns:1fr} }
 </style>
 </head>
@@ -500,9 +543,11 @@ if (isset($_GET['action'])) {
     <div class="props" id="propsList"></div>
   </div>
 
+  <!-- Form submissions notice/error message -->
+  <div class="hint" id="subsHint" style="display:none;"></div>
+
   <div class="card" id="dataCard" style="display:none">
     <div class="grid-title">Form Data</div>
-    <div class="hint" id="subsHint" style="margin-bottom:8px; display:none;"></div>
     <div style="overflow:auto; max-height:60vh">
       <table id="dataTable">
         <thead><tr id="theadRow"></tr></thead>
@@ -538,7 +583,15 @@ const formsHint   = qs('#formsHint');
 
 let currentFormId = null;
 let currentColumns = [];
-let paging = { next: null, prev: null, total: null, cursorStack: [] };
+let paging = { 
+  next: null, 
+  prev: null, 
+  total: null, 
+  totalPages: null,
+  currentPage: 1,
+  cursorStack: [], // Stack of cursors for navigation
+  recordCount: 0
+};
 
 async function api(action, params={}){
   const url = new URL(location.href);
@@ -581,15 +634,41 @@ function renderTable(columns, rows){
   theadRow.innerHTML = '';
   columns.forEach(c=>{
     const th = document.createElement('th');
-    th.textContent = c;
+    // Capitalize and format column headers
+    let displayName = c;
+    if (c === 'createdate') displayName = 'Created Date';
+    else if (c === 'lastmodifieddate') displayName = 'Last Modified';
+    else displayName = c.charAt(0).toUpperCase() + c.slice(1);
+    
+    th.textContent = displayName;
     theadRow.appendChild(th);
   });
+  
   tbodyRows.innerHTML = '';
   rows.forEach(r=>{
     const tr = document.createElement('tr');
     columns.forEach(c=>{
       const td = document.createElement('td');
-      td.textContent = (r[c] ?? '');
+      let value = r[c] ?? '';
+      
+      // Format dates for better readability
+      if ((c === 'createdate' || c === 'lastmodifieddate') && value) {
+        try {
+          const date = new Date(value);
+          if (!isNaN(date.getTime())) {
+            value = date.toLocaleString();
+          }
+        } catch (e) {
+          // Keep original value if date parsing fails
+        }
+      }
+      
+      td.textContent = value;
+      // Add special styling for date columns
+      if (c === 'createdate' || c === 'lastmodifieddate') {
+        td.style.fontSize = '13px';
+        td.style.color = 'var(--cp-muted)';
+      }
       tr.appendChild(td);
     });
     tbodyRows.appendChild(tr);
@@ -651,6 +730,7 @@ async function onFormChange(){
     // Hide cards if no form selected
     propsCard.style.display = 'none';
     dataCard.style.display = 'none';
+    subsHint.style.display = 'none';
     formIdPill.textContent = '—';
     return;
   }
@@ -705,66 +785,156 @@ async function onFormChange(){
   // Always render properties, even if empty
   renderProps(fields);
 
-  // Submissions page 1
-  paging = { next:null, prev:null, total:null, cursorStack:[] };
+  // Reset and load submissions page 1
+  paging = { 
+    next: null, 
+    prev: null, 
+    total: null, 
+    totalPages: null,
+    currentPage: 1,
+    cursorStack: [],
+    recordCount: 0
+  };
+  
+  // Always attempt to load submissions - let loadSubmissions handle the "not supported" case
   await loadSubmissions(null, true);
 }
 
-function updatePagerUI(totalKnown, recordCountOnPage){
-  // We don’t always get total; show what we can
-  const pageNum = (paging.cursorStack.length || 0) + 1;
-  const totalPages = totalKnown ? Math.max(1, Math.ceil(totalKnown / 25)) : '—';
-  const totalRecs  = totalKnown ?? '—';
-  statsText.textContent = `Page ${pageNum} of ${totalPages} • ${totalRecs} records`;
+function updatePagerUI(pagingData){
+  const pageNum = pagingData.currentPage || paging.currentPage;
+  const totalPages = pagingData.totalPages || paging.totalPages || '—';
+  const totalRecs = pagingData.total || paging.total || '—';
+  const recordCount = pagingData.recordCount || 0;
+  
+  // Update display
+  if (totalPages !== '—' && totalRecs !== '—') {
+    statsText.textContent = `Page ${pageNum} of ${totalPages} • ${totalRecs} records total (${recordCount} on this page)`;
+  } else {
+    statsText.textContent = `Page ${pageNum} • ${recordCount} records on this page`;
+  }
 
-  qs('#prevBtn').disabled = paging.cursorStack.length === 0;
-  qs('#firstBtn').disabled = paging.cursorStack.length === 0;
-  qs('#nextBtn').disabled  = !paging.next;
-  qs('#lastBtn').disabled  = !totalKnown || !paging.next; // naive until total is known
+  // Update button states
+  const hasPrev = pagingData.hasPrev !== undefined ? pagingData.hasPrev : (paging.cursorStack.length > 0);
+  const hasNext = pagingData.hasNext !== undefined ? pagingData.hasNext : !!paging.next;
+  
+  qs('#prevBtn').disabled = !hasPrev;
+  qs('#firstBtn').disabled = !hasPrev;
+  qs('#nextBtn').disabled = !hasNext;
+  qs('#lastBtn').disabled = !hasNext || totalPages === '—';
+  
+  // Update paging state
+  paging.currentPage = pageNum;
+  paging.total = pagingData.total || paging.total;
+  paging.totalPages = pagingData.totalPages || paging.totalPages;
+  paging.next = pagingData.next;
+  paging.recordCount = recordCount;
 }
 
 async function loadSubmissions(after=null, reset=false){
-  tbodyRows.innerHTML = '<tr><td>Loading…</td></tr>';
-  const data = await api('submissions', { id: currentFormId, limit:25, after });
-  if (!data.supported){
+  try {
+    const data = await api('submissions', { id: currentFormId, limit: 25, after });
+    
+    if (!data.supported) {
+      // Hide the data card entirely when submissions are not supported
+      dataCard.style.display = 'none';
+      subsHint.style.display = 'block';
+      subsHint.textContent = data.message || 'Form submissions API not available in this account or token scope. You can still validate forms & fields.';
+      subsHint.className = 'notice notice-warning';
+      return;
+    }
+
+    // Show the data card and hide any previous messages
+    dataCard.style.display = 'block';
+    subsHint.style.display = 'none';
+    subsHint.className = 'hint'; // Reset to default styling
+    
+    // Show loading state
+    if (currentColumns.length > 0) {
+      tbodyRows.innerHTML = `<tr><td colspan="${currentColumns.length}" style="text-align: center; padding: 20px; color: var(--cp-muted);">Loading submissions...</td></tr>`;
+    } else {
+      tbodyRows.innerHTML = '<tr><td>Loading…</td></tr>';
+    }
+    
+    // Handle empty results
+    if (!data.rows || data.rows.length === 0) {
+      renderTable(data.columns || ['createdate', 'lastmodifieddate'], []);
+      // Show empty state
+      tbodyRows.innerHTML = `<tr><td colspan="${data.columns?.length || 2}" style="text-align: center; padding: 20px; color: var(--cp-muted); font-style: italic;">No form submissions found</td></tr>`;
+      updatePagerUI({ currentPage: 1, totalPages: 1, total: 0, recordCount: 0, hasNext: false, hasPrev: false });
+      return;
+    }
+    
+    renderTable(data.columns, data.rows);
+    
+    // Reset cursor stack if this is a fresh load
+    if (reset) {
+      paging.cursorStack = [];
+      paging.currentPage = 1;
+    }
+    
+    // Update pagination state
+    updatePagerUI(data.paging);
+    
+  } catch (e) {
+    console.error('Error loading submissions:', e);
+    // Hide the data card and show error message prominently
+    dataCard.style.display = 'none';
     subsHint.style.display = 'block';
-    subsHint.textContent = data.message || 'Submissions not available.';
-    renderTable(['createdate','lastmodifieddate'], []);
-    updatePagerUI(null, 0);
-    return;
+    subsHint.textContent = 'Error loading submissions: ' + e.message;
+    subsHint.className = 'notice notice-error';
   }
-
-  subsHint.style.display = 'none';
-  renderTable(data.columns, data.rows);
-  paging.next = data.paging?.next || null;
-  paging.total = data.paging?.total || null;
-
-  if (reset) paging.cursorStack = [];
-  updatePagerUI(paging.total, data.rows.length);
 }
 
 // Pager events
-qs('#nextBtn').addEventListener('click', async ()=>{
+qs('#nextBtn').addEventListener('click', async () => {
   if (!paging.next) return;
-  paging.cursorStack.push(paging.next); // push current end id as history marker
-  await loadSubmissions(paging.next);
+  // Store current cursor for back navigation
+  const currentCursor = paging.next;
+  paging.cursorStack.push({ cursor: currentCursor, page: paging.currentPage });
+  paging.currentPage++;
+  await loadSubmissions(currentCursor);
 });
-qs('#prevBtn').addEventListener('click', async ()=>{
-  if (!paging.cursorStack.length) return;
-  // Pop last cursor and compute the one before that to pass as 'after'
-  paging.cursorStack.pop();
-  const prevCursor = paging.cursorStack.length ? paging.cursorStack[paging.cursorStack.length - 1] : null;
+
+qs('#prevBtn').addEventListener('click', async () => {
+  if (paging.cursorStack.length === 0) return;
+  // Go back to previous page
+  const lastState = paging.cursorStack.pop();
+  paging.currentPage = Math.max(1, paging.currentPage - 1);
+  
+  // Determine cursor for previous page
+  const prevCursor = paging.cursorStack.length > 0 ? 
+    paging.cursorStack[paging.cursorStack.length - 1].cursor : null;
+  
   await loadSubmissions(prevCursor);
 });
-qs('#firstBtn').addEventListener('click', async ()=>{
+
+qs('#firstBtn').addEventListener('click', async () => {
   paging.cursorStack = [];
-  await loadSubmissions(null);
+  paging.currentPage = 1;
+  await loadSubmissions(null, true);
 });
-qs('#lastBtn').addEventListener('click', async ()=>{
-  // Best-effort: step forward until no next (may require multiple clicks)
-  if (paging.next) {
-    paging.cursorStack.push(paging.next);
-    await loadSubmissions(paging.next);
+
+qs('#lastBtn').addEventListener('click', async () => {
+  // For last page, we need to navigate through all pages
+  // This is a limitation of cursor-based pagination
+  if (!paging.totalPages || paging.totalPages === '—') {
+    // If we don't know total pages, just go to next page
+    if (paging.next) {
+      const currentCursor = paging.next;
+      paging.cursorStack.push({ cursor: currentCursor, page: paging.currentPage });
+      paging.currentPage++;
+      await loadSubmissions(currentCursor);
+    }
+  } else {
+    // Try to estimate last page navigation
+    while (paging.next && paging.currentPage < paging.totalPages) {
+      const currentCursor = paging.next;
+      paging.cursorStack.push({ cursor: currentCursor, page: paging.currentPage });
+      paging.currentPage++;
+      await loadSubmissions(currentCursor);
+      // Add a small delay to prevent overwhelming the API
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
 });
 
