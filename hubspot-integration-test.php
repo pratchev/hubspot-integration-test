@@ -156,12 +156,20 @@ function get_forms(): array {
  * Get details for one form (fields), trying v3 then v2.
  */
 function get_form_details(string $formId): array {
+    // Log the request for debugging
+    error_log('Getting form details for form ID: ' . $formId);
+    
     // v3
     $r = hs_request('GET', HUBSPOT_BASE . '/marketing/v3/forms/' . urlencode($formId));
+    error_log('Form details v3 response: ' . json_encode($r));
+    
     if ($r['ok'] && isset($r['data'])) {
         $fields = [];
-        if (!empty($r['data']['formFieldGroups'])) {
-            foreach ($r['data']['formFieldGroups'] as $g) {
+        $formData = $r['data'];
+        
+        // Try different possible field structures
+        if (!empty($formData['formFieldGroups'])) {
+            foreach ($formData['formFieldGroups'] as $g) {
                 foreach (($g['fields'] ?? []) as $fld) {
                     $fields[] = [
                         'name' => $fld['name'] ?? '',
@@ -170,15 +178,58 @@ function get_form_details(string $formId): array {
                     ];
                 }
             }
+        } elseif (!empty($formData['fields'])) {
+            // Some forms might have fields directly at the root level
+            foreach ($formData['fields'] as $fld) {
+                $fields[] = [
+                    'name' => $fld['name'] ?? '',
+                    'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                    'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
+                ];
+            }
+        } elseif (!empty($formData['configuration']['createNewContactForNewEmail'])) {
+            // Try to extract fields from configuration
+            if (!empty($formData['configuration']['postSubmitActions'])) {
+                foreach ($formData['configuration']['postSubmitActions'] as $action) {
+                    if (!empty($action['fields'])) {
+                        foreach ($action['fields'] as $fld) {
+                            $fields[] = [
+                                'name' => $fld['name'] ?? '',
+                                'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                                'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
+                            ];
+                        }
+                    }
+                }
+            }
         }
-        return ['id' => $r['data']['id'] ?? $formId, 'name' => $r['data']['name'] ?? '', 'fields' => $fields];
+        
+        error_log('Extracted fields from v3: ' . json_encode($fields));
+        return ['id' => $formData['id'] ?? $formId, 'name' => $formData['name'] ?? '', 'fields' => $fields];
     }
-    // v2
+    // v2 fallback
+    error_log('Trying v2 form details API for form: ' . $formId);
     $r2 = hs_request('GET', HUBSPOT_BASE . '/forms/v2/forms/' . urlencode($formId));
+    error_log('Form details v2 response: ' . json_encode($r2));
+    
     if ($r2['ok'] && isset($r2['data'])) {
         $fields = [];
-        foreach (($r2['data']['formFieldGroups'] ?? []) as $g) {
-            foreach (($g['fields'] ?? []) as $fld) {
+        $formData = $r2['data'];
+        
+        // Try different field structures for v2
+        if (!empty($formData['formFieldGroups'])) {
+            foreach ($formData['formFieldGroups'] as $g) {
+                foreach (($g['fields'] ?? []) as $fld) {
+                    $fields[] = [
+                        'name' => $fld['name'] ?? '',
+                        'label' => $fld['label'] ?? ($fld['name'] ?? ''),
+                        'type'  => $fld['fieldType'] ?? ($fld['type'] ?? ''),
+                    ];
+                }
+            }
+        } elseif (!empty($formData['fields'])) {
+            // Some v2 forms might have fields directly
+            foreach ($formData['fields'] as $fld) {
                 $fields[] = [
                     'name' => $fld['name'] ?? '',
                     'label' => $fld['label'] ?? ($fld['name'] ?? ''),
@@ -186,8 +237,12 @@ function get_form_details(string $formId): array {
                 ];
             }
         }
-        return ['id' => $formId, 'name' => $r2['data']['name'] ?? '', 'fields' => $fields];
+        
+        error_log('Extracted fields from v2: ' . json_encode($fields));
+        return ['id' => $formId, 'name' => $formData['name'] ?? '', 'fields' => $fields];
     }
+    
+    error_log('No form details found for form ID: ' . $formId);
     return ['id' => $formId, 'name' => '', 'fields' => []];
 }
 
@@ -291,13 +346,28 @@ if (isset($_GET['action'])) {
             break;
         case 'formDetails':
             $id = $_GET['id'] ?? '';
-            echo json_encode(get_form_details($id));
+            $result = get_form_details($id);
+            // Add debug info to the response
+            $result['debug'] = [
+                'requested_id' => $id,
+                'field_count' => count($result['fields'] ?? []),
+                'has_fields' => !empty($result['fields'])
+            ];
+            echo json_encode($result);
             break;
         case 'submissions':
             $id = $_GET['id'] ?? '';
             $after = $_GET['after'] ?? null;
             $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 25;
             echo json_encode(get_form_submissions($id, $limit, $after));
+            break;
+        case 'debug':
+            echo json_encode([
+                'token_configured' => HS_TOKEN !== 'YOUR_HUBSPOT_TOKEN_HERE',
+                'token_length' => strlen(HS_TOKEN),
+                'php_version' => PHP_VERSION,
+                'curl_available' => function_exists('curl_init')
+            ]);
             break;
         default:
             echo json_encode(['error' => 'Unknown action']);
@@ -457,14 +527,26 @@ async function api(action, params={}){
 
 function renderProps(fields){
   propsList.innerHTML = '';
-  const max = fields.length;
+  const validFields = (fields || []).filter(f => f && (f.name || f.label));
+  const max = validFields.length;
   propCount.textContent = max;
-  fields.forEach((f, i) => {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<div class="prop-name">${f.label || f.name}</div><div class="prop-type">${f.name}${f.type? ' • '+f.type : ''}</div>`;
-    propsList.appendChild(row);
-  });
+  
+  if (max === 0) {
+    const noFieldsMsg = document.createElement('div');
+    noFieldsMsg.className = 'prop-row';
+    noFieldsMsg.innerHTML = `<div class="prop-name" style="color: var(--cp-muted); font-style: italic;">No form fields found</div><div class="prop-type" style="color: var(--cp-muted); font-size: 12px;">This might indicate that the HubSpot token is not configured or the form has no fields.</div>`;
+    propsList.appendChild(noFieldsMsg);
+  } else {
+    validFields.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.className = 'prop-row';
+      const label = f.label || f.name || 'Unnamed field';
+      const name = f.name || '';
+      const type = f.type || '';
+      row.innerHTML = `<div class="prop-name">${label}</div><div class="prop-type">${name}${type ? ' • '+type : ''}</div>`;
+      propsList.appendChild(row);
+    });
+  }
   propsCard.style.display = 'block';
 }
 
@@ -499,9 +581,9 @@ async function loadForms(){
     if (forms.length === 0 && data.debug) {
       let debugMsg = 'No forms found. ';
       if (!data.debug.token_set) {
-        debugMsg += 'HubSpot token not configured.';
+        debugMsg += 'HubSpot token not configured. Please set HUBSPOT_TOKEN in .env file or edit the PHP file directly.';
       } else {
-        debugMsg += `Token configured (${data.debug.token_length} chars). Check token permissions.`;
+        debugMsg += `Token configured (${data.debug.token_length} chars). Check token permissions for forms access.`;
       }
       formsHint.textContent = debugMsg;
       formsHint.style.color = 'var(--cp-red)';
@@ -550,28 +632,51 @@ async function onFormChange(){
   currentFormId = id;
   formIdPill.textContent = id;
 
-  // Fields: if list API didn't include them, fetch details
+  // Try to get fields from the dropdown data first (if available and non-empty)
   let fields = [];
+  let fieldsSource = 'none';
+  
   try {
     const selectedOption = formsSelect.selectedOptions[0];
     if (selectedOption && selectedOption.dataset.fields) {
-      fields = JSON.parse(selectedOption.dataset.fields);
+      const cachedFields = JSON.parse(selectedOption.dataset.fields);
+      if (cachedFields && cachedFields.length > 0) {
+        fields = cachedFields;
+        fieldsSource = 'dropdown';
+        console.log('Using fields from dropdown data:', fields);
+      }
     }
   } catch (e) {
     console.warn('Error parsing fields from select option:', e);
   }
   
-  // If no fields from the dropdown data, fetch them via API
-  if (!fields || fields.length === 0){
+  // If no fields from dropdown, or very few fields, fetch from API
+  if (!fields || fields.length === 0) {
     try {
+      console.log('Fetching fresh form details for form ID:', id);
       const fd = await api('formDetails', { id });
-      fields = fd.fields || [];
+      console.log('Raw API response:', fd);
+      if (fd && fd.fields) {
+        fields = fd.fields;
+        fieldsSource = 'api';
+        console.log('Form details fetched from API:', fields);
+      } else {
+        console.warn('API returned no field data:', fd);
+        // Show debug info in the UI
+        if (fd && fd.debug) {
+          propsList.innerHTML = `<div class="prop-row"><div class="prop-name" style="color: var(--cp-muted);">Debug: Form ID ${fd.debug.requested_id}, Field count: ${fd.debug.field_count}, Has fields: ${fd.debug.has_fields}</div></div>`;
+        }
+      }
     } catch (e) {
-      console.error('Error fetching form details:', e);
-      fields = [];
+      console.error('Error fetching form details from API:', e);
+      // Show error in the UI
+      propsList.innerHTML = `<div class="prop-row"><div class="prop-name" style="color: var(--cp-red);">Error: ${e.message}</div></div>`;
     }
   }
   
+  console.log(`Final fields (${fieldsSource}):`, fields);
+  
+  // Always render properties, even if empty
   renderProps(fields);
 
   // Submissions page 1
