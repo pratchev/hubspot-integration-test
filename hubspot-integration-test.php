@@ -20,8 +20,33 @@
 
 // ---------------------- CONFIG ----------------------
 const HUBSPOT_BASE   = 'https://api.hubapi.com';
+
+// Load environment variables from .env file if it exists
+function loadEnv($filePath) {
+    if (!file_exists($filePath)) {
+        return;
+    }
+    $lines = file($filePath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(trim($line), '#') === 0) {
+            continue; // Skip comments
+        }
+        list($name, $value) = explode('=', $line, 2);
+        $name = trim($name);
+        $value = trim($value);
+        if (!array_key_exists($name, $_SERVER) && !array_key_exists($name, $_ENV)) {
+            putenv(sprintf('%s=%s', $name, $value));
+            $_ENV[$name] = $value;
+            $_SERVER[$name] = $value;
+        }
+    }
+}
+
+// Load .env file
+loadEnv(__DIR__ . '/.env');
+
 // Set your HubSpot Private App token here or via environment variable
-$hs_token = $_ENV['HUBSPOT_TOKEN'] ?? 'YOUR_HUBSPOT_TOKEN_HERE';
+$hs_token = $_ENV['HUBSPOT_TOKEN'] ?? getenv('HUBSPOT_TOKEN') ?? 'YOUR_HUBSPOT_TOKEN_HERE';
 define('HS_TOKEN', $hs_token);
 // ----------------------------------------------------
 
@@ -62,6 +87,12 @@ function hs_request(string $method, string $url, array $query = [], $body = null
  * v2: GET /forms/v2/forms
  */
 function get_forms(): array {
+    // Check if token is set
+    if (HS_TOKEN === 'YOUR_HUBSPOT_TOKEN_HERE' || empty(HS_TOKEN)) {
+        error_log('HubSpot token not configured');
+        return [];
+    }
+    
     // Try v3
     $r = hs_request('GET', HUBSPOT_BASE . '/marketing/v3/forms', ['limit' => 250]);
     if ($r['ok'] && isset($r['data']['results'])) {
@@ -90,6 +121,9 @@ function get_forms(): array {
         return $forms;
     }
 
+    // Log v3 error for debugging
+    error_log('HubSpot v3 forms API failed: ' . json_encode($r));
+
     // Fall back to v2 (legacy)
     $r2 = hs_request('GET', HUBSPOT_BASE . '/forms/v2/forms');
     $forms = [];
@@ -111,6 +145,9 @@ function get_forms(): array {
             }
             $forms[] = ['id' => $id, 'name' => $name, 'fields' => $fields, 'raw' => $f];
         }
+    } else {
+        // Log v2 error for debugging
+        error_log('HubSpot v2 forms API also failed: ' . json_encode($r2));
     }
     return $forms;
 }
@@ -237,7 +274,20 @@ if (isset($_GET['action'])) {
     header('Content-Type: application/json; charset=utf-8');
     switch ($_GET['action']) {
         case 'listForms':
-            echo json_encode(['forms' => get_forms()]);
+            $forms = get_forms();
+            // Add debug info if no forms found
+            if (empty($forms)) {
+                echo json_encode([
+                    'forms' => [],
+                    'debug' => [
+                        'token_set' => HS_TOKEN !== 'YOUR_HUBSPOT_TOKEN_HERE',
+                        'token_length' => strlen(HS_TOKEN),
+                        'hubspot_base' => HUBSPOT_BASE
+                    ]
+                ]);
+            } else {
+                echo json_encode(['forms' => $forms]);
+            }
             break;
         case 'formDetails':
             $id = $_GET['id'] ?? '';
@@ -441,29 +491,50 @@ function renderTable(columns, rows){
 
 async function loadForms(){
   formsHint.textContent = 'Loading forms…';
-  const data = await api('listForms');
-  const forms = data.forms || [];
-  // Sort forms alphabetically by name
-  forms.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  formsSelect.innerHTML = '';
-  // Add default empty option
-  const defaultOpt = document.createElement('option');
-  defaultOpt.value = '';
-  defaultOpt.textContent = 'Select a form...';
-  formsSelect.appendChild(defaultOpt);
-  
-  forms.forEach(f=>{
-    const opt = document.createElement('option');
-    opt.value = f.id;
-    opt.textContent = f.name;
-    opt.dataset.fields = JSON.stringify(f.fields || []);
-    formsSelect.appendChild(opt);
-  });
-  formsHint.textContent = `${forms.length} forms loaded`;
-  
-  // Don't auto-select first form, let user choose
-  formsSelect.value = '';
-  onFormChange();
+  try {
+    const data = await api('listForms');
+    const forms = data.forms || [];
+    
+    // Show debug info if no forms and debug data is available
+    if (forms.length === 0 && data.debug) {
+      let debugMsg = 'No forms found. ';
+      if (!data.debug.token_set) {
+        debugMsg += 'HubSpot token not configured.';
+      } else {
+        debugMsg += `Token configured (${data.debug.token_length} chars). Check token permissions.`;
+      }
+      formsHint.textContent = debugMsg;
+      formsHint.style.color = 'var(--cp-red)';
+      return;
+    }
+    
+    // Sort forms alphabetically by name
+    forms.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    formsSelect.innerHTML = '';
+    // Add default empty option
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Select a form...';
+    formsSelect.appendChild(defaultOpt);
+    
+    forms.forEach(f=>{
+      const opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = f.name;
+      opt.dataset.fields = JSON.stringify(f.fields || []);
+      formsSelect.appendChild(opt);
+    });
+    formsHint.textContent = `${forms.length} forms loaded`;
+    formsHint.style.color = 'var(--cp-muted)';
+    
+    // Don't auto-select first form, let user choose
+    formsSelect.value = '';
+    onFormChange();
+  } catch (e) {
+    console.error('Error loading forms:', e);
+    formsHint.textContent = 'Error loading forms: ' + e.message;
+    formsHint.style.color = 'var(--cp-red)';
+  }
 }
 
 async function onFormChange(){
