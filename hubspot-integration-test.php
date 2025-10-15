@@ -387,6 +387,153 @@ function get_form_submissions(string $formId, int $limit = 25, ?string $after = 
     ];
 }
 
+/**
+ * Get contacts from form submissions using CRM Search API
+ * POST /crm/v3/objects/contacts/search
+ * Filter: hs_calculated_form_submissions BETWEEN <formGuid>::1111111111111 and <formGuid>::9999999999999
+ *         OR hs_calculated_form_submissions CONTAINS_TOKEN <formGuid>
+ */
+function get_contacts_from_form_submissions(string $formId, int $limit = 25, int $offset = 0): array {
+    // Check if token is set
+    if (HS_TOKEN === 'YOUR_HUBSPOT_TOKEN_HERE' || empty(HS_TOKEN)) {
+        error_log('HubSpot token not configured for contacts search');
+        return [
+            'supported' => false,
+            'message' => 'HubSpot token not configured. Please set HUBSPOT_TOKEN in .env file or edit the PHP file directly.',
+            'rows' => [],
+            'columns' => ['id', 'email', 'firstname', 'lastname', 'createdAt', 'franchise_id', 'hs_analytics_first_url'],
+            'paging' => [
+                'offset' => $offset,
+                'limit' => $limit,
+                'hasNext' => false,
+                'hasPrev' => false,
+                'currentPage' => 1,
+                'total' => 0,
+                'totalPages' => 1
+            ]
+        ];
+    }
+
+    $url = HUBSPOT_BASE . '/crm/v3/objects/contacts/search';
+    
+    $searchBody = [
+        'filterGroups' => [
+            [
+                'filters' => [
+                    [
+                        'propertyName' => 'hs_calculated_form_submissions',
+                        'operator' => 'BETWEEN',
+                        'value' => $formId . '::1111111111111',
+                        'highValue' => $formId . '::9999999999999'
+                    ]
+                ]
+            ],
+            [
+                'filters' => [
+                    [
+                        'propertyName' => 'hs_calculated_form_submissions',
+                        'operator' => 'CONTAINS_TOKEN',
+                        'value' => $formId
+                    ]
+                ]
+            ]
+        ],
+        'properties' => [
+            'id', 'email', 'firstname', 'lastname', 'createdate', 'updatedAt',
+            'phone', 'company', 'jobtitle', 'lifecyclestage', 'hs_calculated_form_submissions',
+            'franchise_id', 'hs_analytics_first_url'
+        ],
+        'sorts' => [
+            [
+                'propertyName' => 'createdate',
+                'direction' => 'DESCENDING'
+            ]
+        ],
+        'limit' => $limit,
+        'after' => $offset
+    ];
+
+    $r = hs_request('POST', $url, [], $searchBody);
+
+    if (!$r['ok']) {
+        error_log('Contacts search API failed: ' . json_encode($r));
+        return [
+            'supported' => false,
+            'message' => 'Contacts search API failed. This might be due to insufficient token permissions or the contact property hs_calculated_form_submissions not being available.',
+            'rows' => [],
+            'columns' => ['id', 'email', 'firstname', 'lastname', 'createdAt', 'franchise_id', 'hs_analytics_first_url'],
+            'paging' => [
+                'offset' => $offset,
+                'limit' => $limit,
+                'hasNext' => false,
+                'hasPrev' => false,
+                'currentPage' => 1,
+                'total' => 0,
+                'totalPages' => 1
+            ],
+            'raw' => $r
+        ];
+    }
+
+    $data = $r['data'] ?? [];
+    $results = $data['results'] ?? [];
+    $total = $data['total'] ?? count($results);
+    $nextOffset = isset($data['paging']['next']['after']) ? $data['paging']['next']['after'] : null;
+    
+    // Normalize contacts to rows
+    $rows = [];
+    $allKeys = ['id', 'email', 'firstname', 'lastname', 'createdate', 'franchise_id', 'hs_analytics_first_url']; // Standard columns first
+    
+    foreach ($results as $contact) {
+        $vals = [];
+        $properties = $contact['properties'] ?? [];
+        
+        // Add standard properties
+        $vals['id'] = $contact['id'] ?? '';
+        $vals['email'] = $properties['email'] ?? '';
+        $vals['firstname'] = $properties['firstname'] ?? '';
+        $vals['lastname'] = $properties['lastname'] ?? '';
+        $vals['createdate'] = $properties['createdate'] ?? '';
+        $vals['franchise_id'] = $properties['franchise_id'] ?? '';
+        $vals['hs_analytics_first_url'] = $properties['hs_analytics_first_url'] ?? '';
+        
+        // Add additional properties
+        foreach ($properties as $key => $value) {
+            if (!in_array($key, ['id', 'email', 'firstname', 'lastname', 'createdate', 'franchise_id', 'hs_analytics_first_url'])) {
+                $vals[$key] = is_array($value) ? json_encode($value) : $value;
+                if (!in_array($key, $allKeys)) {
+                    $allKeys[] = $key;
+                }
+            }
+        }
+        
+        $rows[] = $vals;
+    }
+
+    // Calculate pagination
+    $currentPage = floor($offset / $limit) + 1;
+    $totalPages = $total > 0 ? ceil($total / $limit) : 1;
+    $hasNext = !empty($nextOffset) || (($offset + $limit) < $total);
+    $hasPrev = $offset > 0;
+
+    return [
+        'supported' => true,
+        'rows' => $rows,
+        'columns' => $allKeys,
+        'paging' => [
+            'offset' => $offset,
+            'limit' => $limit,
+            'hasNext' => $hasNext,
+            'hasPrev' => $hasPrev,
+            'currentPage' => $currentPage,
+            'total' => $total,
+            'totalPages' => $totalPages,
+            'recordCount' => count($rows)
+        ],
+        'raw' => $data
+    ];
+}
+
 // ---------------- AJAX API ----------------
 if (isset($_GET['action'])) {
     header('Content-Type: application/json; charset=utf-8');
@@ -423,6 +570,12 @@ if (isset($_GET['action'])) {
             $after = $_GET['after'] ?? null;
             $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 25;
             echo json_encode(get_form_submissions($id, $limit, $after));
+            break;
+        case 'contacts':
+            $id = $_GET['id'] ?? '';
+            $offset = isset($_GET['offset']) ? (int)$_GET['offset'] : 0;
+            $limit = isset($_GET['limit']) ? (int)$_GET['limit'] : 25;
+            echo json_encode(get_contacts_from_form_submissions($id, $limit, $offset));
             break;
         case 'debug':
             echo json_encode([
@@ -505,6 +658,20 @@ if (isset($_GET['action'])) {
   .conversation-column{width:4%; min-width:35px;}
   .submitted-column{width:5%; min-width:40px;}}}
   .table-container{overflow-x:auto; max-width:100%;}
+  .contacts-table-container{overflow-x:auto; max-width:100%; border:1px solid var(--cp-border); border-radius:10px;}
+  .contacts-table{width:auto; border-collapse:separate; border-spacing:0; font-size:14px; min-width:1200px;}
+  .contacts-table thead{background:var(--cp-navy); color:#fff; position:sticky; top:0;}
+  .contacts-table th, .contacts-table td{padding:12px 16px; border-bottom:1px solid var(--cp-border); text-align: left; white-space:nowrap; min-width:120px;}
+  .contacts-table th{font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;}
+  .contacts-table tbody tr:nth-child(even){background:#fafafa;}
+  .contacts-table tbody tr:hover{background:#f0f4f8;}
+  .contacts-table td{vertical-align: top;}
+  .contacts-table th.email-col, .contacts-table td.email-col{min-width:200px; max-width:250px;}
+  .contacts-table th.url-col, .contacts-table td.url-col{min-width:180px; max-width:300px; word-break:break-all;}
+  .contacts-table th.id-col, .contacts-table td.id-col{min-width:100px; max-width:120px;}
+  .contacts-table th.name-col, .contacts-table td.name-col{min-width:140px;}
+  .contacts-table th.date-col, .contacts-table td.date-col{min-width:160px;}
+  .contacts-table th.franchise-col, .contacts-table td.franchise-col{min-width:120px;}
   .toolbar{display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:10px; flex-wrap: wrap;}
   .btn{
     appearance:none; border:1px solid var(--cp-navy); background:#fff; color:var(--cp-navy);
@@ -586,6 +753,30 @@ if (isset($_GET['action'])) {
       <div class="stats" id="statsText">Page 1 • 0 records on this page</div>
     </div>
   </div>
+
+  <!-- Contacts from form submissions notice/error message -->
+  <div class="hint" id="contactsHint" style="display:none;"></div>
+
+  <div class="card" id="contactsCard" style="display:none">
+    <div class="grid-title">Contacts from Form Submissions</div>
+    <div class="contacts-table-container">
+      <div style="overflow:auto; max-height:70vh">
+        <table id="contactsTable" class="contacts-table">
+          <thead><tr id="contactsTheadRow"></tr></thead>
+          <tbody id="contactsTbodyRows"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="toolbar">
+      <div class="inline">
+        <button class="btn" id="contactsFirstBtn">⏮ First</button>
+        <button class="btn" id="contactsPrevBtn">◀ Prev</button>
+        <button class="btn" id="contactsNextBtn">Next ▶</button>
+        <button class="btn" id="contactsLastBtn">⏭ Last</button>
+      </div>
+      <div class="stats" id="contactsStatsText">Page 1 • 0 records on this page</div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -602,6 +793,11 @@ const tbodyRows   = qs('#tbodyRows');
 const statsText   = qs('#statsText');
 const subsHint    = qs('#subsHint');
 const formsHint   = qs('#formsHint');
+const contactsCard = qs('#contactsCard');
+const contactsTheadRow = qs('#contactsTheadRow');
+const contactsTbodyRows = qs('#contactsTbodyRows');
+const contactsStatsText = qs('#contactsStatsText');
+const contactsHint = qs('#contactsHint');
 
 let currentFormId = null;
 let currentColumns = [];
@@ -614,6 +810,17 @@ let paging = {
   cursorStack: [], // Stack of cursors for navigation
   recordCount: 0
 };
+
+let contactsPaging = {
+  offset: 0,
+  limit: 25,
+  total: null,
+  totalPages: null,
+  currentPage: 1,
+  recordCount: 0
+};
+
+let currentContactsColumns = [];
 
 async function api(action, params={}){
   const url = new URL(location.href);
@@ -716,6 +923,92 @@ function renderTable(columns, rows){
   dataCard.style.display = 'block';
 }
 
+function renderContactsTable(columns, rows){
+  currentContactsColumns = columns;
+  contactsTheadRow.innerHTML = '';
+  columns.forEach(c=>{
+    const th = document.createElement('th');
+    // Capitalize and format column headers
+    let displayName = c;
+    if (c === 'id') displayName = 'Contact ID';
+    else if (c === 'firstname') displayName = 'First Name';
+    else if (c === 'lastname') displayName = 'Last Name';
+    else if (c === 'createdate') displayName = 'Created Date';
+    else if (c === 'updatedAt') displayName = 'Last Modified';
+    else if (c === 'lifecyclestage') displayName = 'Lifecycle Stage';
+    else if (c === 'jobtitle') displayName = 'Job Title';
+    else if (c === 'hs_calculated_form_submissions') displayName = 'Form Submissions';
+    else if (c === 'franchise_id') displayName = 'Franchise ID';
+    else if (c === 'hs_analytics_first_url') displayName = 'First URL';
+    else displayName = c.charAt(0).toUpperCase() + c.slice(1);
+    
+    // Add CSS classes for column sizing
+    if (c === 'email') th.className = 'email-col';
+    else if (c === 'hs_analytics_first_url') th.className = 'url-col';
+    else if (c === 'id') th.className = 'id-col';
+    else if (c === 'firstname' || c === 'lastname') th.className = 'name-col';
+    else if (c === 'createdate' || c === 'updatedAt') th.className = 'date-col';
+    else if (c === 'franchise_id') th.className = 'franchise-col';
+    
+    th.textContent = displayName;
+    contactsTheadRow.appendChild(th);
+  });
+  
+  contactsTbodyRows.innerHTML = '';
+  rows.forEach(r=>{
+    const tr = document.createElement('tr');
+    columns.forEach(c=>{
+      const td = document.createElement('td');
+      let value = r[c] ?? '';
+      
+      // Format dates for better readability
+      if ((c === 'createdate' || c === 'updatedAt') && value) {
+        try {
+          // HubSpot timestamps are in milliseconds
+          const timestamp = parseInt(value);
+          if (!isNaN(timestamp) && timestamp > 0) {
+            const date = new Date(timestamp);
+            if (date.getFullYear() > 1970) { // Sanity check
+              value = date.toLocaleString();
+            }
+          }
+        } catch (e) {
+          // Keep original value if date parsing fails
+        }
+      }
+      
+      // Add CSS classes for column sizing
+      if (c === 'email') td.className = 'email-col';
+      else if (c === 'hs_analytics_first_url') td.className = 'url-col';
+      else if (c === 'id') td.className = 'id-col';
+      else if (c === 'firstname' || c === 'lastname') td.className = 'name-col';
+      else if (c === 'createdate' || c === 'updatedAt') td.className = 'date-col';
+      else if (c === 'franchise_id') td.className = 'franchise-col';
+      
+      // Format email as link
+      if (c === 'email' && value) {
+        const link = document.createElement('a');
+        link.href = 'mailto:' + value;
+        link.textContent = value;
+        link.style.color = 'var(--cp-accent)';
+        td.appendChild(link);
+      } else {
+        td.textContent = value;
+      }
+      
+      // Add special styling for date columns
+      if (c === 'createdate' || c === 'updatedAt') {
+        td.style.fontSize = '13px';
+        td.style.color = 'var(--cp-muted)';
+      }
+      
+      tr.appendChild(td);
+    });
+    contactsTbodyRows.appendChild(tr);
+  });
+  contactsCard.style.display = 'block';
+}
+
 async function loadForms(){
   formsHint.textContent = 'Loading forms…';
   try {
@@ -770,7 +1063,9 @@ async function onFormChange(){
     // Hide cards if no form selected
     propsCard.style.display = 'none';
     dataCard.style.display = 'none';
+    contactsCard.style.display = 'none';
     subsHint.style.display = 'none';
+    contactsHint.style.display = 'none';
     formIdPill.textContent = '—';
     return;
   }
@@ -836,8 +1131,21 @@ async function onFormChange(){
     recordCount: 0
   };
   
+  // Reset contacts paging
+  contactsPaging = {
+    offset: 0,
+    limit: 25,
+    total: null,
+    totalPages: null,
+    currentPage: 1,
+    recordCount: 0
+  };
+  
   // Always attempt to load submissions - let loadSubmissions handle the "not supported" case
   await loadSubmissions(null, true);
+  
+  // Load contacts from form submissions
+  await loadContacts(0, true);
 }
 
 function updatePagerUI(pagingData){
@@ -873,6 +1181,41 @@ function updatePagerUI(pagingData){
   paging.totalPages = pagingData.totalPages || paging.totalPages;
   paging.next = pagingData.next;
   paging.recordCount = recordCount;
+}
+
+function updateContactsPagerUI(pagingData){
+  const pageNum = pagingData.currentPage || contactsPaging.currentPage;
+  const totalPages = pagingData.totalPages || contactsPaging.totalPages || '—';
+  const totalRecs = pagingData.total !== undefined ? pagingData.total : (contactsPaging.total !== undefined ? contactsPaging.total : null);
+  const recordCount = pagingData.recordCount || 0;
+  
+  // Update display with total records
+  let displayText = `Page ${pageNum}`;
+  if (totalPages !== '—') {
+    displayText += ` of ${totalPages}`;
+  }
+  displayText += ` • ${recordCount} records on this page`;
+  if (totalRecs !== null && totalRecs !== '—') {
+    displayText += ` • ${totalRecs} total records`;
+  }
+  
+  contactsStatsText.textContent = displayText;
+
+  // Update button states
+  const hasPrev = pagingData.hasPrev !== undefined ? pagingData.hasPrev : false;
+  const hasNext = pagingData.hasNext !== undefined ? pagingData.hasNext : false;
+  
+  qs('#contactsPrevBtn').disabled = !hasPrev;
+  qs('#contactsFirstBtn').disabled = !hasPrev;
+  qs('#contactsNextBtn').disabled = !hasNext;
+  qs('#contactsLastBtn').disabled = !hasNext || totalPages === '—';
+  
+  // Update contacts paging state
+  contactsPaging.currentPage = pageNum;
+  contactsPaging.total = pagingData.total !== undefined ? pagingData.total : contactsPaging.total;
+  contactsPaging.totalPages = pagingData.totalPages || contactsPaging.totalPages;
+  contactsPaging.offset = pagingData.offset !== undefined ? pagingData.offset : contactsPaging.offset;
+  contactsPaging.recordCount = recordCount;
 }
 
 async function loadSubmissions(after=null, reset=false){
@@ -927,6 +1270,55 @@ async function loadSubmissions(after=null, reset=false){
     subsHint.style.display = 'block';
     subsHint.textContent = 'Error loading submissions: ' + e.message;
     subsHint.className = 'notice notice-error';
+  }
+}
+
+async function loadContacts(offset=0, reset=false){
+  try {
+    const data = await api('contacts', { id: currentFormId, limit: 25, offset });
+    
+    if (!data.supported) {
+      // Hide the contacts card entirely when contacts API is not supported
+      contactsCard.style.display = 'none';
+      contactsHint.style.display = 'block';
+      contactsHint.textContent = data.message || 'Contacts search API not available in this account or token scope.';
+      contactsHint.className = 'notice notice-warning';
+      return;
+    }
+
+    // Show the contacts card and hide any previous messages
+    contactsCard.style.display = 'block';
+    contactsHint.style.display = 'none';
+    contactsHint.className = 'hint'; // Reset to default styling
+    
+    // Show loading state
+    if (currentContactsColumns.length > 0) {
+      contactsTbodyRows.innerHTML = `<tr><td colspan="${currentContactsColumns.length}" style="text-align: center; padding: 20px; color: var(--cp-muted);">Loading contacts...</td></tr>`;
+    } else {
+      contactsTbodyRows.innerHTML = '<tr><td>Loading…</td></tr>';
+    }
+    
+    // Handle empty results
+    if (!data.rows || data.rows.length === 0) {
+      renderContactsTable(data.columns || ['id', 'email', 'firstname', 'lastname', 'createdate', 'franchise_id', 'hs_analytics_first_url'], []);
+      // Show empty state
+      contactsTbodyRows.innerHTML = `<tr><td colspan="${data.columns?.length || 5}" style="text-align: center; padding: 20px; color: var(--cp-muted); font-style: italic;">No contacts found for this form</td></tr>`;
+      updateContactsPagerUI({ currentPage: 1, totalPages: 1, total: 0, recordCount: 0, hasNext: false, hasPrev: false, offset: 0 });
+      return;
+    }
+    
+    renderContactsTable(data.columns, data.rows);
+    
+    // Update pagination state
+    updateContactsPagerUI(data.paging);
+    
+  } catch (e) {
+    console.error('Error loading contacts:', e);
+    // Hide the contacts card and show error message prominently
+    contactsCard.style.display = 'none';
+    contactsHint.style.display = 'block';
+    contactsHint.textContent = 'Error loading contacts: ' + e.message;
+    contactsHint.className = 'notice notice-error';
   }
 }
 
@@ -994,6 +1386,28 @@ qs('#lastBtn').addEventListener('click', async () => {
       // Add a small delay to prevent overwhelming the API
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+  }
+});
+
+// Contacts pager events
+qs('#contactsNextBtn').addEventListener('click', async () => {
+  const nextOffset = contactsPaging.offset + contactsPaging.limit;
+  await loadContacts(nextOffset);
+});
+
+qs('#contactsPrevBtn').addEventListener('click', async () => {
+  const prevOffset = Math.max(0, contactsPaging.offset - contactsPaging.limit);
+  await loadContacts(prevOffset);
+});
+
+qs('#contactsFirstBtn').addEventListener('click', async () => {
+  await loadContacts(0, true);
+});
+
+qs('#contactsLastBtn').addEventListener('click', async () => {
+  if (contactsPaging.totalPages && contactsPaging.totalPages !== '—') {
+    const lastOffset = (contactsPaging.totalPages - 1) * contactsPaging.limit;
+    await loadContacts(lastOffset);
   }
 });
 
