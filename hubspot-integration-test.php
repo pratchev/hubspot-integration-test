@@ -656,7 +656,7 @@ if (isset($_GET['action'])) {
   td{vertical-align: top;}
   .url-column{width:8%; min-width:65px; word-wrap:break-word; overflow-wrap:break-word;}
   .conversation-column{width:4%; min-width:35px;}
-  .submitted-column{width:5%; min-width:40px;}}}
+  .submitted-column{width:5%; min-width:40px;}
   .table-container{overflow-x:auto; max-width:100%;}
   .contacts-table-container{overflow-x:auto; max-width:100%; border:1px solid var(--cp-border); border-radius:10px;}
   .contacts-table{width:auto; border-collapse:separate; border-spacing:0; font-size:14px; min-width:1200px;}
